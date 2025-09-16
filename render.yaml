@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: liquidlevel-api
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: liquidlevel
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: READINGS_TTL_DAYS
+        value: "7"
+      - key: BRIDGE_REFRESH_MS
+        value: "60000"
+      # MQTT and FCM vars can be added in Render UI or here as sync: false
+      - key: MQTT_URL
+        sync: false
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false

@@ -1,0 +1,30 @@
+version: "3.8"
+services:
+  api:
+    build: .
+    container_name: liquidlevel-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # change left side to map to a different host port if needed
+    environment:
+      PORT: "8080"
+      # Provide your own values below
+      MONGODB_URI: "mongodb+srv://<user>:<pass>@cluster.mongodb.net/?retryWrites=true&w=majority"
+      MONGODB_DB: "liquidlevel"
+      MQTT_URL: "tcp://broker.example.com:1883"
+      # Or provide MQTT_USERNAME/MQTT_PASSWORD instead of embedding in MQTT_URL
+      # MQTT_USERNAME: ""
+      # MQTT_PASSWORD: ""
+      # Restrict CORS to your app/site origin in production
+      CORS_ORIGIN: "*"
+      # Choose one of the following cred methods:
+      # 1) Mount secret file and point to it:
+      GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/service-account.json"
+      # 2) Or inline JSON as an env var (use with caution):
+      # FIREBASE_SERVICE_ACCOUNT_JSON: "${FIREBASE_SERVICE_ACCOUNT_JSON}"
+    secrets:
+      - service-account.json
+
+secrets:
+  service-account.json:
+    file: ./service-account.json
