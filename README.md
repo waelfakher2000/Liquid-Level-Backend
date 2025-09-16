@@ -1,22 +1,30 @@
-<<<<<<< HEAD
-# Liquid-Level-Backend
-=======
+````markdown
 # LiquidLevel API (Node + Express)
 
-Minimal backend API that connects to MongoDB Atlas using the official driver and keeps credentials outside the Flutter app.
+Backend service for Liquid Level projects. It connects to MongoDB Atlas, optionally listens to MQTT, and can send Firebase Cloud Messaging (FCM) notifications. Built with Node.js (ES modules), Express, MongoDB driver, mqtt, and firebase-admin.
 
-## Setup
+## Quick Start (Local)
 
-1. Copy .env.example to .env and fill values:
+1) Create `.env` from the example and fill values:
 
 ```
-MONGODB_URI=mongodb+srv://waelfakher4_db_user:<PASSWORD>@liquidlevel.z2sod5d.mongodb.net/?retryWrites=true&w=majority&appName=liquidlevel
+MONGODB_URI=mongodb+srv://<user>:<password>@<cluster-host>/?retryWrites=true&w=majority&appName=liquidlevel
 MONGODB_DB=liquidlevel
 PORT=8080
 CORS_ORIGIN=*
+# Optional
+MQTT_URL=tcp://broker.example.com:1883
+MQTT_USERNAME=
+MQTT_PASSWORD=
+READINGS_TTL_DAYS=7
+BRIDGE_REFRESH_MS=60000
+# FCM (choose exactly one)
+FIREBASE_SERVICE_ACCOUNT_JSON={...full JSON...}
+# or
+GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 ```
 
-2. Install deps and run (Windows PowerShell):
+2) Install deps and run (Windows PowerShell):
 
 ```
 cd api
@@ -24,19 +32,36 @@ npm install
 npm run dev
 ```
 
-- http://localhost:8080/projects
+3) Check health:
 
-- For production, prefer hosting on a secure environment and keep the MONGODB_URI secret in the host.
+```
+GET http://localhost:8080/health
+```
 
-## Optional: Enable FCM push notifications
+## Environment Variables
 
-This API can push Firebase Cloud Messaging (FCM) notifications to devices when MQTT readings arrive.
+- MONGODB_URI (required): MongoDB Atlas connection string.
+- MONGODB_DB (default: liquidlevel): Database name.
+- PORT (default: 8080): Port to listen on (Render sets this automatically).
+- CORS_ORIGIN (default: *): Allowed origins for CORS.
+- MQTT_URL / MQTT_USERNAME / MQTT_PASSWORD (optional): Override broker connection for the MQTT bridge.
+- READINGS_TTL_DAYS (optional): Retention for `readings` via TTL.
+- BRIDGE_REFRESH_MS (default: 60000): How often to resync project subscriptions.
+- FIREBASE_SERVICE_ACCOUNT_JSON (preferred) or GOOGLE_APPLICATION_CREDENTIALS: Enable FCM push notifications.
 
-1. Add Firebase Admin credentials:
-	- Place your Firebase service account JSON at `api/service-account.json`, or set an environment variable `GOOGLE_APPLICATION_CREDENTIALS` to the absolute path of the file.
-2. Install dependencies (already added to package.json):
-	- `firebase-admin`
-3. Register device tokens from the app by calling:
+## Endpoints
+
+- GET `/health` → { ok: true, info: { version } }
+- GET `/projects` → List projects (from DB)
+- POST `/projects` → Upsert project config for the bridge
+- POST `/readings` → Store a reading
+- GET `/readings` → Query readings for charts (projectId, from/to, limit)
+- POST `/register-device` → Register a device FCM token (optional projectId)
+- POST `/bridge/reload` → Manually refresh project subscriptions
+
+## FCM Notifications (Optional)
+
+If FCM is configured, incoming MQTT messages will be stored and a push notification will be sent to registered device tokens. Register device tokens via:
 
 ```
 POST /register-device
@@ -44,55 +69,36 @@ Content-Type: application/json
 
 { "token": "<device_fcm_token>", "projectId": "<optional-project-id>" }
 ```
-- If `projectId` is omitted, the token is considered global and will receive notifications for all projects. If set, the token receives for that project only.
 
-When a message is received on a subscribed MQTT topic, the bridge stores the reading to MongoDB and (if FCM is enabled) sends a push notification to the registered tokens.
+## Deploy to Render
 
-## Deploying to Render
+1) Create a Web Service from this repository.
+   - Build Command: `npm install`
+   - Start Command: `npm start`
 
-1) Push this `api/` folder to its own GitHub repository (see steps below).
-
-2) On Render, create a new Web Service connected to that repo:
-	- Runtime: Node
-	- Build Command: `npm install`
-	- Start Command: `npm start`
-	- Environment: set the following variables:
+2) Set environment variables:
 
 ```
 MONGODB_URI=...           # required
 MONGODB_DB=liquidlevel    # optional
-PORT=10000                # Render sets PORT automatically; you can leave it unset
 CORS_ORIGIN=*             # or your app origin(s)
 
-# Optional MQTT and retention settings
-MQTT_URL=tcp://broker:1883
+MQTT_URL=...              # optional
 MQTT_USERNAME=
 MQTT_PASSWORD=
 READINGS_TTL_DAYS=7
 BRIDGE_REFRESH_MS=60000
 
-# FCM (choose ONE of the following)
+# FCM (choose ONE)
 FIREBASE_SERVICE_ACCOUNT_JSON={...full JSON...}
 # or
 GOOGLE_APPLICATION_CREDENTIALS=/opt/render/project/src/service-account.json
 ```
 
-3) If using `GOOGLE_APPLICATION_CREDENTIALS`, add `service-account.json` to the repo or Render secrets storage. Prefer using `FIREBASE_SERVICE_ACCOUNT_JSON` to avoid committing files.
+3) Open the service URL and check `/health`.
 
-### Split `api/` to a new GitHub repo (Windows PowerShell)
+### Render Blueprint (optional)
 
-From the project root:
+The repo includes `render.yaml` for one‑click deploys.
 
-```
-cd api
-git init
-git add .
-git commit -m "Initial commit: LiquidLevel API"
-# Create a new empty repo on GitHub first, then set it here:
-git remote add origin https://github.com/<your-user>/<new-repo>.git
-git branch -M main
-git push -u origin main
-```
-
-Then, in Render, pick this new repository when creating the Web Service.
->>>>>>> 3ec53ba (Initial commit: LiquidLevel API)
+````
