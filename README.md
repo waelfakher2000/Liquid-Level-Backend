@@ -23,7 +23,6 @@ FIREBASE_SERVICE_ACCOUNT_JSON={...full JSON...}
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 ```
 
-If you run locally for development, you can set a PORT yourself (e.g., 8080) and run `npm run dev`.
 
 ## Environment Variables
 
