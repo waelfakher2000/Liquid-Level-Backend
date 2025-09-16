@@ -5,7 +5,10 @@ dotenv.config();
 
 const uri = process.env.MONGODB_URI;
 if (!uri) {
-  console.error('Missing MONGODB_URI in environment');
+  const msg = 'MONGODB_URI is required. Set it in your hosting environment (Render: Service → Environment → Add Variable).';
+  console.error(msg);
+  // Throw to fail fast during startup, avoiding confusing MongoClient errors
+  throw new Error(msg);
 }
 
 export const client = new MongoClient(uri, {
