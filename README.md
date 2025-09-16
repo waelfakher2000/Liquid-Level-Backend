@@ -3,14 +3,13 @@
 
 Backend service for Liquid Level projects. It connects to MongoDB Atlas, optionally listens to MQTT, and can send Firebase Cloud Messaging (FCM) notifications. Built with Node.js (ES modules), Express, MongoDB driver, mqtt, and firebase-admin.
 
-## Quick Start (Local)
+## Quick Start
 
-1) Create `.env` from the example and fill values:
+For deployment on Render, create a Web Service from this repository and set the environment variables below. The PORT is provided by Render automatically; you do not need to set it.
 
 ```
 MONGODB_URI=mongodb+srv://<user>:<password>@<cluster-host>/?retryWrites=true&w=majority&appName=liquidlevel
 MONGODB_DB=liquidlevel
-PORT=8080
 CORS_ORIGIN=*
 # Optional
 MQTT_URL=tcp://broker.example.com:1883
@@ -24,25 +23,13 @@ FIREBASE_SERVICE_ACCOUNT_JSON={...full JSON...}
 GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 ```
 
-2) Install deps and run (Windows PowerShell):
-
-```
-cd api
-npm install
-npm run dev
-```
-
-3) Check health:
-
-```
-GET http://localhost:8080/health
-```
+If you run locally for development, you can set a PORT yourself (e.g., 8080) and run `npm run dev`.
 
 ## Environment Variables
 
 - MONGODB_URI (required): MongoDB Atlas connection string.
 - MONGODB_DB (default: liquidlevel): Database name.
-- PORT (default: 8080): Port to listen on (Render sets this automatically).
+- PORT: Port to listen on. On Render this is injected automatically; do not set it manually there.
 - CORS_ORIGIN (default: *): Allowed origins for CORS.
 - MQTT_URL / MQTT_USERNAME / MQTT_PASSWORD (optional): Override broker connection for the MQTT bridge.
 - READINGS_TTL_DAYS (optional): Retention for `readings` via TTL.

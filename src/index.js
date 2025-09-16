@@ -130,10 +130,14 @@ app.get('/readings', async (req, res) => {
   }
 });
 
-const port = Number(process.env.PORT || 8080);
+const port = Number(process.env.PORT);
+if (!port || Number.isNaN(port)) {
+  console.error('Missing required PORT environment variable. On Render, this is injected automatically.');
+  process.exit(1);
+}
 initDb().then(() => {
   app.listen(port, '0.0.0.0', () => {
-    console.log(`API listening on http://localhost:${port}`);
+    console.log(`API listening on port ${port}`);
   });
   // Start MQTT bridge after DB init
   initFcm();
