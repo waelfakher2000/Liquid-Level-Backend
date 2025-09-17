@@ -10,6 +10,31 @@ const clients = new Map(); // key -> { client, topicToProjects: Map<topic, Set<p
 let currentSubs = new Map(); // projectId -> { topic, clientKey, sensorType, multiplier, offset, tankType, alertsEnabled, alertLow, alertHigh, alertCooldownSec, notifyOnRecover }
 const lastAlertState = new Map(); // projectId -> { lastState: 'normal'|'low'|'high', lastTs: number }
 let bridgeRunning = false;
+// Optional per-message update notifications (very noisy) are disabled by default.
+// Set NOTIFY_UPDATES=true to enable, and optionally NOTIFY_UPDATES_INTERVAL_SEC to throttle.
+const notifyUpdates = String(process.env.NOTIFY_UPDATES).toLowerCase() === 'true';
+const notifyUpdatesIntervalSec = Number.isFinite(Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC))
+  ? Math.max(0, Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC))
+  : 0; // 0 = no throttle if enabled
+const lastUpdatePush = new Map(); // projectId -> last push timestamp (ms)
+
+function _collectInvalidTokens(sendRes, tokens) {
+  try {
+    if (!sendRes || !sendRes.res || !Array.isArray(sendRes.res.responses)) return [];
+    const bad = [];
+    const responses = sendRes.res.responses;
+    for (let i = 0; i < responses.length; i++) {
+      const r = responses[i];
+      if (r && r.error && tokens[i]) {
+        const code = r.error.code || r.error.message || '';
+        if (String(code).includes('registration-token-not-registered') || String(code).includes('UNREGISTERED')) {
+          bad.push(tokens[i]);
+        }
+      }
+    }
+    return bad;
+  } catch { return []; }
+}
 
 function parseNumberFromPayload(payload, opts) {
   try {
@@ -140,7 +165,7 @@ export async function refreshBridgeProjects() {
                   const devices = await deviceCursor.toArray();
                   const tokens = devices.map(d => d.token).filter(Boolean);
                   if (tokens.length) {
-                    await sendToTokens(tokens, {
+                    const res = await sendToTokens(tokens, {
                       notification: {
                         title: `${alertTitle} (${projectId})`,
                         body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}`
@@ -152,6 +177,11 @@ export async function refreshBridgeProjects() {
                         alertState: state,
                       }
                     });
+                    // purge invalid tokens
+                    const invalid = _collectInvalidTokens(res, tokens);
+                    if (invalid.length) {
+                      try { await db.collection('devices').deleteMany({ token: { $in: invalid } }); } catch {}
+                    }
                   }
                 } catch (e) {
                   console.warn('Bridge: FCM alert send failed', e?.message || e);
@@ -170,13 +200,20 @@ export async function refreshBridgeProjects() {
               }
             }
 
-            if (isFcmEnabled()) {
+            if (isFcmEnabled() && notifyUpdates) {
               try {
+                // Optional throttle for update notifications
+                const nowMs2 = Date.now();
+                const lastTs = lastUpdatePush.get(projectId) || 0;
+                const minGapMs = notifyUpdatesIntervalSec * 1000;
+                if (minGapMs > 0 && (nowMs2 - lastTs) < minGapMs) {
+                  return; // skip due to throttle
+                }
                 const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
                 const devices = await deviceCursor.toArray();
                 const tokens = devices.map(d => d.token).filter(Boolean);
                 if (tokens.length) {
-                  await sendToTokens(tokens, {
+                  const res = await sendToTokens(tokens, {
                     notification: {
                       title: `Level update (${projectId})`,
                       body: `New level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}`
@@ -187,6 +224,11 @@ export async function refreshBridgeProjects() {
                       ts: ts.toISOString(),
                     }
                   });
+                  const invalid = _collectInvalidTokens(res, tokens);
+                  if (invalid.length) {
+                    try { await db.collection('devices').deleteMany({ token: { $in: invalid } }); } catch {}
+                  }
+                  if (minGapMs > 0) lastUpdatePush.set(projectId, nowMs2);
                 }
               } catch (e) {
                 console.warn('Bridge: FCM send failed', e?.message || e);
