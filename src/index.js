@@ -40,6 +40,11 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// Lightweight ping that doesn't touch Mongo (good for uptime monitors)
+app.get('/ping', (req, res) => {
+  res.json({ ok: true, ts: new Date().toISOString() });
+});
+
 // Example route: list projects
 app.get('/projects', async (req, res) => {
   try {
