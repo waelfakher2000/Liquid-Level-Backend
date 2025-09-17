@@ -1,6 +1,7 @@
 import admin from 'firebase-admin';
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -10,23 +11,29 @@ let initialized = false;
 export function initFcm() {
   if (initialized) return;
   try {
-    // Prefer JSON from env for container/secret-friendly deployments
-    const jsonFromEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-    let credential;
-    if (jsonFromEnv) {
-      const obj = JSON.parse(jsonFromEnv);
-      credential = admin.credential.cert(obj);
-    } else {
-      const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
-        || path.resolve(process.cwd(), 'service-account.json');
-      if (!fs.existsSync(serviceAccountPath)) {
-        console.warn('[FCM] service-account.json not found; FCM disabled');
-        return;
-      }
-      credential = admin.credential.cert(serviceAccountPath);
+    // Load service account from file path. Do not JSON.parse env.
+    const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
+      || path.resolve(process.cwd(), 'service-account.json');
+    if (!fs.existsSync(serviceAccountPath)) {
+      console.warn('[FCM] Service account file not found; set GOOGLE_APPLICATION_CREDENTIALS or add service-account.json. FCM disabled');
+      return;
     }
 
-    admin.initializeApp({ credential });
+    // In ESM, emulate require to load JSON object
+    const requireCjs = createRequire(import.meta.url);
+    let serviceAccount;
+    try {
+      serviceAccount = requireCjs(serviceAccountPath);
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    } catch (e) {
+      // Fallback: pass path directly to Admin SDK (also supported by SDK)
+      try {
+        admin.initializeApp({ credential: admin.credential.cert(serviceAccountPath) });
+      } catch (e2) {
+        console.warn('[FCM] Initialization failed:', e2?.message || e2);
+        return;
+      }
+    }
     initialized = true;
     console.log('[FCM] Admin initialized');
   } catch (e) {

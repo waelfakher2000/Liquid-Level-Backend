@@ -5,8 +5,10 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-let client;
-let currentSubs = new Map(); // projectId -> { topic, sensorType, multiplier, offset, tankType }
+// Manage multiple MQTT clients keyed by broker URL + auth
+const clients = new Map(); // key -> { client, topicToProjects: Map<topic, Set<projectId>> }
+let currentSubs = new Map(); // projectId -> { topic, clientKey, sensorType, multiplier, offset, tankType, alertsEnabled, alertLow, alertHigh, alertCooldownSec, notifyOnRecover }
+const lastAlertState = new Map(); // projectId -> { lastState: 'normal'|'low'|'high', lastTs: number }
 let bridgeRunning = false;
 
 function parseNumberFromPayload(payload, opts) {
@@ -27,8 +29,8 @@ function parseNumberFromPayload(payload, opts) {
 
 async function upsertProjectsFromDb() {
   const db = await getDb();
-  // Pull projects that have storeHistory true
-  const projects = await db.collection('projects').find({ storeHistory: true }).toArray();
+  // Pull projects that are relevant to the bridge: storeHistory OR alertsEnabled
+  const projects = await db.collection('projects').find({ $or: [ { storeHistory: true }, { alertsEnabled: true } ] }).toArray();
   return projects.map(p => ({
     projectId: p.id,
     topic: p.topic,
@@ -40,6 +42,11 @@ async function upsertProjectsFromDb() {
     multiplier: typeof p.multiplier === 'number' ? p.multiplier : 1,
     offset: typeof p.offset === 'number' ? p.offset : 0,
     tankType: p.tankType,
+    alertsEnabled: p.alertsEnabled === true,
+    alertLow: (typeof p.alertLow === 'number') ? p.alertLow : null,
+    alertHigh: (typeof p.alertHigh === 'number') ? p.alertHigh : null,
+    alertCooldownSec: Number.isFinite(p.alertCooldownSec) ? Number(p.alertCooldownSec) : 1800,
+    notifyOnRecover: p.notifyOnRecover === true,
   }));
 }
 
@@ -55,52 +62,112 @@ export async function startBridge() {
 export async function refreshBridgeProjects() {
   const db = await getDb();
   const list = await upsertProjectsFromDb();
-  // Group by broker for now; if multiple brokers, we create one client per broker.
-  // For simplicity, support a single broker via env MQTT_URL override.
-  const mqttUrl = process.env.MQTT_URL; // e.g., tcp://broker:1883
-  let connectUrl = mqttUrl;
-  let auth = {};
-  if (!connectUrl && list.length > 0) {
-    const p = list[0];
-    connectUrl = `tcp://${p.broker}:${p.port || 1883}`;
-    auth = { username: p.username, password: p.password };
-  }
-  if (!connectUrl) {
-    console.warn('Bridge: No MQTT broker configured and no projects found');
-    return;
+
+  // Helper to build a client key and URL/auth for a project
+  function clientConfigForProject(p) {
+    // Per-project settings take precedence; fallback to global env if provided
+    const urlFromEnv = process.env.MQTT_URL;
+    const url = urlFromEnv || (p.broker && p.port ? `tcp://${p.broker}:${p.port}` : null);
+    const username = process.env.MQTT_USERNAME || p.username || undefined;
+    const password = process.env.MQTT_PASSWORD || p.password || undefined;
+    if (!url) return null;
+    const key = `${url}::${username || ''}`; // simple key including auth username
+    return { key, url, username, password };
   }
 
-  if (!client) {
-    client = mqtt.connect(connectUrl, {
-      username: process.env.MQTT_USERNAME || auth.username,
-      password: process.env.MQTT_PASSWORD || auth.password,
-      reconnectPeriod: 3000,
-      clean: true,
-    });
-    client.on('connect', () => console.log('Bridge: MQTT connected'));
-    client.on('reconnect', () => console.log('Bridge: MQTT reconnecting'));
-    client.on('error', (e) => console.error('Bridge: MQTT error', e?.message || e));
-    client.on('message', async (topic, msg) => {
-      try {
-        // Find matching project for this topic
-        for (const [projectId, cfg] of currentSubs.entries()) {
-          if (cfg.topic === topic) {
-            const v = parseNumberFromPayload(msg, cfg);
-            if (v == null) return;
-            // Interpret: for submersible, v=level; for ultrasonic, v=distance -> convert if needed on server.
-            // For now assume submersible-like behavior (level directly), matching app default.
+  // Ensure clients exist for each required broker/auth
+  const requiredKeys = new Set();
+  for (const p of list) {
+    const cfg = clientConfigForProject(p);
+    if (!cfg) continue;
+    requiredKeys.add(cfg.key);
+    if (!clients.has(cfg.key)) {
+      const c = mqtt.connect(cfg.url, {
+        username: cfg.username,
+        password: cfg.password,
+        reconnectPeriod: 3000,
+        clean: true,
+      });
+      const topicToProjects = new Map(); // topic -> Set(projectId)
+      c.on('connect', () => console.log(`Bridge: MQTT connected ${cfg.url}`));
+      c.on('reconnect', () => console.log(`Bridge: MQTT reconnecting ${cfg.url}`));
+      c.on('error', (e) => console.error(`Bridge: MQTT error ${cfg.url}`, e?.message || e));
+      c.on('message', async (topic, msg) => {
+        try {
+          const projectIds = topicToProjects.get(topic);
+          if (!projectIds || projectIds.size === 0) return;
+          for (const projectId of projectIds) {
+            const subCfg = currentSubs.get(projectId);
+            if (!subCfg) continue;
+            const v = parseNumberFromPayload(msg, subCfg);
+            if (v == null) continue;
             const ts = new Date();
             const doc = {
               projectId,
               levelMeters: v,
-              percent: 0, // percent can be computed on the app/chart side or extended here when capacity known
+              percent: 0,
               liquidLiters: 0,
               totalLiters: 0,
               ts,
             };
-            await db.collection('readings').insertOne(doc);
+            if (subCfg.storeHistory) {
+              await db.collection('readings').insertOne(doc);
+            }
 
-            // Push FCM notification to registered devices
+            // Alerts evaluation
+            if (subCfg.alertsEnabled) {
+              const low = (typeof subCfg.alertLow === 'number') ? subCfg.alertLow : null;
+              const high = (typeof subCfg.alertHigh === 'number') ? subCfg.alertHigh : null;
+              let state = 'normal';
+              if (low != null && v < low) state = 'low';
+              if (high != null && v > high) state = 'high';
+
+              const prev = lastAlertState.get(projectId) || { lastState: 'normal', lastTs: 0 };
+              const nowMs = Date.now();
+              const cooldownMs = Math.max(0, Number(subCfg.alertCooldownSec || 0) * 1000);
+              const cooledDown = (nowMs - prev.lastTs) >= cooldownMs;
+
+              const crossedIntoAlert = (prev.lastState === 'normal' && (state === 'low' || state === 'high'));
+              const recovered = (prev.lastState !== 'normal' && state === 'normal');
+              const alertTitle = state === 'low' ? 'Low level alert' : state === 'high' ? 'High level alert' : 'Level back to normal';
+              const shouldNotify = (crossedIntoAlert && cooledDown) || (recovered && subCfg.notifyOnRecover && cooledDown);
+
+              if (shouldNotify && isFcmEnabled()) {
+                try {
+                  const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
+                  const devices = await deviceCursor.toArray();
+                  const tokens = devices.map(d => d.token).filter(Boolean);
+                  if (tokens.length) {
+                    await sendToTokens(tokens, {
+                      notification: {
+                        title: `${alertTitle} (${projectId})`,
+                        body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}`
+                      },
+                      data: {
+                        projectId: String(projectId),
+                        levelMeters: String(v),
+                        ts: ts.toISOString(),
+                        alertState: state,
+                      }
+                    });
+                  }
+                } catch (e) {
+                  console.warn('Bridge: FCM alert send failed', e?.message || e);
+                }
+              }
+
+              // Update last state when entering alert or recovering
+              if ((crossedIntoAlert && cooledDown) || recovered) {
+                lastAlertState.set(projectId, { lastState: state, lastTs: nowMs });
+                // Persist minimal state for observability (optional)
+                try {
+                  await db.collection('projects').updateOne({ id: projectId }, {
+                    $set: { lastAlertState: state, lastAlertAt: new Date(nowMs) }
+                  });
+                } catch {}
+              }
+            }
+
             if (isFcmEnabled()) {
               try {
                 const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
@@ -124,33 +191,80 @@ export async function refreshBridgeProjects() {
               }
             }
           }
+        } catch (e) {
+          console.warn('Bridge: insert failed', e?.message || e);
         }
-      } catch (e) {
-        console.warn('Bridge: insert failed', e?.message || e);
-      }
-    });
+      });
+      clients.set(cfg.key, { client: c, topicToProjects });
+    }
   }
 
-  // Resubscribe to topics
-  // Unsubscribe obsolete
+  // Unsubscribe/remove current subs that are no longer in the DB
   for (const [pid, cfg] of currentSubs.entries()) {
     if (!list.find(p => p.projectId === pid)) {
-      try { client.unsubscribe(cfg.topic); } catch {}
+      const entry = clients.get(cfg.clientKey);
+      if (entry) {
+        try { entry.client.unsubscribe(cfg.topic); } catch {}
+        const set = entry.topicToProjects.get(cfg.topic);
+        if (set) { set.delete(pid); if (set.size === 0) entry.topicToProjects.delete(cfg.topic); }
+      }
       currentSubs.delete(pid);
     }
   }
-  // Subscribe new
+
+  // Subscribe new/updated
   for (const p of list) {
-    if (!p.topic || currentSubs.has(p.projectId)) continue;
-    client.subscribe(p.topic, { qos: 0 }, (err) => {
-      if (err) console.error('Bridge: subscribe error', p.topic, err?.message || err);
-    });
-    currentSubs.set(p.projectId, {
-      topic: p.topic,
-      sensorType: p.sensorType,
-      multiplier: p.multiplier,
-      offset: p.offset,
-      tankType: p.tankType,
-    });
+    if (!p.topic) continue;
+    const cfg = clientConfigForProject(p);
+    if (!cfg) continue;
+    const entry = clients.get(cfg.key);
+    if (!entry) continue; // should not happen
+    const already = currentSubs.get(p.projectId);
+    const topicChanged = already && already.topic !== p.topic;
+    const clientChanged = already && already.clientKey !== cfg.key;
+    if (!already || topicChanged || clientChanged) {
+      // Unsubscribe old mapping if exists
+      if (already) {
+        const oldEntry = clients.get(already.clientKey);
+        if (oldEntry) {
+          try { oldEntry.client.unsubscribe(already.topic); } catch {}
+          const set = oldEntry.topicToProjects.get(already.topic);
+          if (set) { set.delete(p.projectId); if (set.size === 0) oldEntry.topicToProjects.delete(already.topic); }
+        }
+      }
+      // Subscribe new
+      entry.client.subscribe(p.topic, { qos: 0 }, (err) => {
+        if (err) console.error('Bridge: subscribe error', p.topic, err?.message || err);
+      });
+      if (!entry.topicToProjects.has(p.topic)) entry.topicToProjects.set(p.topic, new Set());
+      entry.topicToProjects.get(p.topic).add(p.projectId);
+      currentSubs.set(p.projectId, {
+        topic: p.topic,
+        clientKey: cfg.key,
+        sensorType: p.sensorType,
+        multiplier: p.multiplier,
+        offset: p.offset,
+        tankType: p.tankType,
+        storeHistory: p.storeHistory === true,
+        alertsEnabled: p.alertsEnabled === true,
+        alertLow: p.alertLow,
+        alertHigh: p.alertHigh,
+        alertCooldownSec: p.alertCooldownSec,
+        notifyOnRecover: p.notifyOnRecover === true,
+      });
+    }
+  }
+
+  // Close clients that are no longer required
+  for (const [key, entry] of clients.entries()) {
+    if (!requiredKeys.has(key)) {
+      try { entry.client.end(true); } catch {}
+      clients.delete(key);
+      console.log(`Bridge: MQTT client closed ${key}`);
+    }
+  }
+
+  if (requiredKeys.size === 0 && clients.size === 0) {
+    console.warn('Bridge: no active MQTT clients (no projects with storeHistory=true and no MQTT_URL override)');
   }
 }

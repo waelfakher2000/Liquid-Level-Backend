@@ -1,7 +1,7 @@
 ````markdown
 # LiquidLevel API (Node + Express)
 
-Backend service for Liquid Level projects. It connects to MongoDB Atlas, optionally listens to MQTT, and can send Firebase Cloud Messaging (FCM) notifications. Built with Node.js (ES modules), Express, MongoDB driver, mqtt, and firebase-admin.
+Backend service for Liquid Level projects. It connects to MongoDB Atlas, optionally listens to MQTT (multi-broker, per project), and can send Firebase Cloud Messaging (FCM) notifications. Built with Node.js (ES modules), Express, MongoDB driver, mqtt, and firebase-admin.
 
 ## Quick Start
 
@@ -11,7 +11,8 @@ For deployment on Render, create a Web Service from this repository and set the 
 MONGODB_URI=mongodb+srv://<user>:<password>@<cluster-host>/?retryWrites=true&w=majority&appName=liquidlevel
 MONGODB_DB=liquidlevel
 CORS_ORIGIN=*
-# Optional
+# Optional (MQTT global override)
+# If set, the bridge will use this single broker for all projects instead of each project's own broker.
 MQTT_URL=tcp://broker.example.com:1883
 MQTT_USERNAME=
 MQTT_PASSWORD=
@@ -40,6 +41,14 @@ GOOGLE_APPLICATION_CREDENTIALS=./service-account.json
 - GET `/health` → { ok: true, info: { version } }
 - GET `/projects` → List projects (from DB)
 - POST `/projects` → Upsert project config for the bridge
+   - Body supports per‑project MQTT and alerts:
+      {
+         id, name,
+         broker, port, topic, username?, password?,
+         storeHistory,
+         multiplier?, offset?, sensorType?, tankType?,
+         alertsEnabled?, alertLow?, alertHigh?, alertCooldownSec?, notifyOnRecover?
+      }
 - POST `/readings` → Store a reading
 - GET `/readings` → Query readings for charts (projectId, from/to, limit)
 - POST `/register-device` → Register a device FCM token (optional projectId)
@@ -86,6 +95,18 @@ GOOGLE_APPLICATION_CREDENTIALS=/opt/render/project/src/service-account.json
 ### Render Blueprint (optional)
 
 The repo includes `render.yaml` for one‑click deploys.
+
+### MQTT Bridge Behavior
+
+- The bridge supports multiple brokers at the same time. Projects are grouped by their broker URL and credentials; one MQTT client is created per unique combination.
+- If you set `MQTT_URL` (and optional username/password), it overrides and uses a single global broker for all projects. Unset `MQTT_URL` to use per‑project brokers.
+- The bridge periodically resyncs subscriptions (default every 60s). You can also call `POST /bridge/reload` to refresh immediately.
+
+#### Alerts
+
+- If `alertsEnabled` is true for a project, incoming values are checked against `alertLow` and `alertHigh` thresholds (in meters, after applying `multiplier` and `offset`).
+- Notifications are sent on threshold crossings (entering low/high from normal). Optionally, set `notifyOnRecover` to true to be notified when the level returns to normal.
+- Use `alertCooldownSec` to avoid spam; the same project won't alert more than once per cooldown window.
 
 ### Troubleshooting (MongoDB Atlas)
 

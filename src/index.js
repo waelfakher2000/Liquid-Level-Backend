@@ -52,7 +52,13 @@ app.get('/projects', async (req, res) => {
 });
 
 // Upsert a project (from app) so bridge can subscribe
-// Body: { id, name, broker, port, topic, username?, password?, storeHistory, multiplier?, offset?, sensorType?, tankType? }
+// Body: {
+//   id, name,
+//   broker, port, topic, username?, password?,
+//   storeHistory,
+//   multiplier?, offset?, sensorType?, tankType?,
+//   alertsEnabled?, alertLow?, alertHigh?, alertCooldownSec?, notifyOnRecover?
+// }
 app.post('/projects', async (req, res) => {
   try {
     const body = req.body || {};
@@ -72,6 +78,11 @@ app.post('/projects', async (req, res) => {
       offset: typeof body.offset === 'number' ? body.offset : 0,
       sensorType: body.sensorType,
       tankType: body.tankType,
+      alertsEnabled: body.alertsEnabled === true,
+      alertLow: (typeof body.alertLow === 'number') ? body.alertLow : null,
+      alertHigh: (typeof body.alertHigh === 'number') ? body.alertHigh : null,
+      alertCooldownSec: Number.isFinite(body.alertCooldownSec) ? Number(body.alertCooldownSec) : 1800, // default 30m
+      notifyOnRecover: body.notifyOnRecover === true,
       updatedAt: new Date(),
     };
     await db.collection('projects').updateOne({ id }, { $set: doc }, { upsert: true });
