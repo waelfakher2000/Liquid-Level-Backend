@@ -88,6 +88,9 @@ app.post('/projects', async (req, res) => {
       alertHigh: (typeof body.alertHigh === 'number') ? body.alertHigh : null,
       alertCooldownSec: Number.isFinite(body.alertCooldownSec) ? Number(body.alertCooldownSec) : 1800, // default 30m
       notifyOnRecover: body.notifyOnRecover === true,
+      alertHysteresisMeters: (typeof body.alertHysteresisMeters === 'number' && body.alertHysteresisMeters >= 0)
+        ? body.alertHysteresisMeters
+        : null,
       updatedAt: new Date(),
     };
     await db.collection('projects').updateOne({ id }, { $set: doc }, { upsert: true });

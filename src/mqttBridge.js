@@ -7,8 +7,12 @@ dotenv.config();
 
 // Manage multiple MQTT clients keyed by broker URL + auth
 const clients = new Map(); // key -> { client, topicToProjects: Map<topic, Set<projectId>> }
-let currentSubs = new Map(); // projectId -> { topic, clientKey, sensorType, multiplier, offset, tankType, alertsEnabled, alertLow, alertHigh, alertCooldownSec, notifyOnRecover }
+let currentSubs = new Map(); // projectId -> { topic, clientKey, sensorType, multiplier, offset, tankType, alertsEnabled, alertLow, alertHigh, alertCooldownSec, notifyOnRecover, alertHysteresisMeters }
 const lastAlertState = new Map(); // projectId -> { lastState: 'normal'|'low'|'high', lastTs: number }
+// Global hysteresis (meters) applied unless overridden per project.
+const globalHysteresis = Number.isFinite(Number(process.env.ALERT_HYSTERESIS_METERS))
+  ? Number(process.env.ALERT_HYSTERESIS_METERS)
+  : 0;
 let bridgeRunning = false;
 // Optional per-message update notifications (very noisy) are disabled by default.
 // Set NOTIFY_UPDATES=true to enable, and optionally NOTIFY_UPDATES_INTERVAL_SEC to throttle.
@@ -74,6 +78,7 @@ async function upsertProjectsFromDb() {
     alertHigh: (typeof p.alertHigh === 'number') ? p.alertHigh : null,
     alertCooldownSec: Number.isFinite(p.alertCooldownSec) ? Number(p.alertCooldownSec) : 1800,
     notifyOnRecover: p.notifyOnRecover === true,
+    alertHysteresisMeters: Number.isFinite(p.alertHysteresisMeters) ? Number(p.alertHysteresisMeters) : null,
   }));
 }
 
@@ -141,19 +146,38 @@ export async function refreshBridgeProjects() {
               await db.collection('readings').insertOne(doc);
             }
 
-            // Alerts evaluation
+            // Alerts evaluation with hysteresis
             if (subCfg.alertsEnabled) {
               const low = (typeof subCfg.alertLow === 'number') ? subCfg.alertLow : null;
               const high = (typeof subCfg.alertHigh === 'number') ? subCfg.alertHigh : null;
-              let state = 'normal';
-              if (low != null && v < low) state = 'low';
-              if (high != null && v > high) state = 'high';
+              const hysteresis = Number.isFinite(subCfg.alertHysteresisMeters) && subCfg.alertHysteresisMeters != null
+                ? subCfg.alertHysteresisMeters
+                : globalHysteresis;
 
               const prev = lastAlertState.get(projectId) || { lastState: 'normal', lastTs: 0 };
+              let state = 'normal';
+
+              // Apply hysteresis: stay in previous alert state until fully cleared by band
+              if (prev.lastState === 'low') {
+                if (low != null) {
+                  if (v < low) state = 'low';
+                  else if (hysteresis > 0 && v < (low + hysteresis)) state = 'low';
+                }
+              } else if (prev.lastState === 'high') {
+                if (high != null) {
+                  if (v > high) state = 'high';
+                  else if (hysteresis > 0 && v > (high - hysteresis)) state = 'high';
+                }
+              }
+              // If not latched above, evaluate fresh entry
+              if (state === 'normal') {
+                if (low != null && v < low) state = 'low';
+                else if (high != null && v > high) state = 'high';
+              }
+
               const nowMs = Date.now();
               const cooldownMs = Math.max(0, Number(subCfg.alertCooldownSec || 0) * 1000);
               const cooledDown = (nowMs - prev.lastTs) >= cooldownMs;
-
               const crossedIntoAlert = (prev.lastState === 'normal' && (state === 'low' || state === 'high'));
               const recovered = (prev.lastState !== 'normal' && state === 'normal');
               const alertTitle = state === 'low' ? 'Low level alert' : state === 'high' ? 'High level alert' : 'Level back to normal';
@@ -168,16 +192,16 @@ export async function refreshBridgeProjects() {
                     const res = await sendToTokens(tokens, {
                       notification: {
                         title: `${alertTitle} (${projectId})`,
-                        body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}`
+                        body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}${hysteresis > 0 ? ` (hyst=${hysteresis}m)` : ''}`
                       },
                       data: {
                         projectId: String(projectId),
                         levelMeters: String(v),
                         ts: ts.toISOString(),
                         alertState: state,
+                        hysteresisMeters: String(hysteresis),
                       }
                     });
-                    // purge invalid tokens
                     const invalid = _collectInvalidTokens(res, tokens);
                     if (invalid.length) {
                       try { await db.collection('devices').deleteMany({ token: { $in: invalid } }); } catch {}
@@ -188,10 +212,8 @@ export async function refreshBridgeProjects() {
                 }
               }
 
-              // Update last state when entering alert or recovering
               if ((crossedIntoAlert && cooledDown) || recovered) {
                 lastAlertState.set(projectId, { lastState: state, lastTs: nowMs });
-                // Persist minimal state for observability (optional)
                 try {
                   await db.collection('projects').updateOne({ id: projectId }, {
                     $set: { lastAlertState: state, lastAlertAt: new Date(nowMs) }
