@@ -38,6 +38,8 @@ async function upsertProjectsFromDb() {
     port: p.port || 1883,
     username: p.username,
     password: p.password,
+    // whether to persist readings for this project
+    storeHistory: p.storeHistory === true,
     sensorType: p.sensorType,
     multiplier: typeof p.multiplier === 'number' ? p.multiplier : 1,
     offset: typeof p.offset === 'number' ? p.offset : 0,
