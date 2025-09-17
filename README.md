@@ -87,4 +87,12 @@ GOOGLE_APPLICATION_CREDENTIALS=/opt/render/project/src/service-account.json
 
 The repo includes `render.yaml` for one‑click deploys.
 
+### Troubleshooting (MongoDB Atlas)
+
+- If you see TLS or handshake errors (for example, "tlsv1 alert internal error"), try:
+   - Ensure your Atlas Project → Network Access allows connections from your Render service (allow 0.0.0.0/0 temporarily to verify connectivity).
+   - Verify your MONGODB_URI is exactly as provided by Atlas (SRV URI, starts with `mongodb+srv://`).
+   - Our server prefers IPv4 DNS results to avoid SRV/IPv6 quirks on some hosts.
+   - Optionally set in Render Environment: `NODE_OPTIONS=--dns-result-order=ipv4first`.
+
 ````

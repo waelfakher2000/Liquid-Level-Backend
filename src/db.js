@@ -1,7 +1,15 @@
 import { MongoClient, ServerApiVersion } from 'mongodb';
+import { setDefaultResultOrder } from 'node:dns';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// Prefer IPv4 for SRV lookups to avoid TLS handshake issues on some hosts
+try {
+  if (typeof setDefaultResultOrder === 'function') {
+    setDefaultResultOrder('ipv4first');
+  }
+} catch {}
 
 const uri = process.env.MONGODB_URI;
 if (!uri) {
