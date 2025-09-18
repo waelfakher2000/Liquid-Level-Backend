@@ -161,11 +161,51 @@ app.post('/projects', authMiddleware, async (req, res) => {
       alertHysteresisMeters: (typeof body.alertHysteresisMeters === 'number' && body.alertHysteresisMeters >= 0)
         ? body.alertHysteresisMeters
         : null,
+      // --- Extended persisted fields for cross-device sync (optional on POST) ---
+      height: (typeof body.height === 'number') ? body.height : null,
+      diameter: (typeof body.diameter === 'number') ? body.diameter : null,
+      length: (typeof body.length === 'number') ? body.length : null,
+      width: (typeof body.width === 'number') ? body.width : null,
+      wallThickness: (typeof body.wallThickness === 'number') ? body.wallThickness : null,
+      minThreshold: (typeof body.minThreshold === 'number') ? body.minThreshold : null,
+      maxThreshold: (typeof body.maxThreshold === 'number') ? body.maxThreshold : null,
+      connectedTankCount: Number.isFinite(body.connectedTankCount) ? Number(body.connectedTankCount) : 1,
+      useCustomFormula: body.useCustomFormula === true,
+      customFormula: (typeof body.customFormula === 'string' && body.customFormula.trim().length) ? body.customFormula.trim() : null,
+      useControlButton: body.useControlButton === true,
+      controlTopic: (typeof body.controlTopic === 'string' && body.controlTopic.trim().length) ? body.controlTopic.trim() : null,
+      controlMode: body.controlMode,
+      onValue: (typeof body.onValue === 'string') ? body.onValue : 'ON',
+      offValue: (typeof body.offValue === 'string') ? body.offValue : 'OFF',
+      autoControl: body.autoControl === true,
+      controlRetained: body.controlRetained === true,
+      controlQos: body.controlQos,
+      lastWillTopic: (typeof body.lastWillTopic === 'string' && body.lastWillTopic.trim().length) ? body.lastWillTopic.trim() : null,
+      payloadIsJson: body.payloadIsJson === true,
+      jsonFieldIndex: Number.isFinite(body.jsonFieldIndex) ? Number(body.jsonFieldIndex) : 1,
+      jsonKeyName: (typeof body.jsonKeyName === 'string' && body.jsonKeyName.trim().length) ? body.jsonKeyName.trim() : null,
+      displayTimeFromJson: body.displayTimeFromJson === true,
+      jsonTimeFieldIndex: Number.isFinite(body.jsonTimeFieldIndex) ? Number(body.jsonTimeFieldIndex) : 1,
+      jsonTimeKeyName: (typeof body.jsonTimeKeyName === 'string' && body.jsonTimeKeyName.trim().length) ? body.jsonTimeKeyName.trim() : null,
+      createdAt: body.createdAt ? new Date(body.createdAt) : new Date(),
       userId: req.user.uid,
       updatedAt: new Date(),
     };
     await db.collection('projects').updateOne({ id, userId: req.user.uid }, { $set: doc }, { upsert: true });
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Delete a project
+app.delete('/projects/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ ok: false, error: 'id required' });
+    const db = await getDb();
+    const del = await db.collection('projects').deleteOne({ id, userId: req.user.uid });
+    res.json({ ok: true, deleted: del.deletedCount });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

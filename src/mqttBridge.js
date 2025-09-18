@@ -73,6 +73,7 @@ async function upsertProjectsFromDb() {
     alertCooldownSec: Number.isFinite(p.alertCooldownSec) ? Number(p.alertCooldownSec) : 1800,
     notifyOnRecover: p.notifyOnRecover === true,
     alertHysteresisMeters: Number.isFinite(p.alertHysteresisMeters) ? Number(p.alertHysteresisMeters) : null,
+    userId: p.userId || null,
   }));
 }
 
@@ -114,6 +115,7 @@ export async function refreshBridgeProjects() {
       c.on('connect', () => console.log(`Bridge: MQTT connected ${cfg.url}`));
       c.on('reconnect', () => console.log(`Bridge: MQTT reconnecting ${cfg.url}`));
       c.on('error', (e) => console.error(`Bridge: MQTT error ${cfg.url}`, e?.message || e));
+      const debug = String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true';
       c.on('message', async (topic, msg) => {
         try {
           const projectIds = topicToProjects.get(topic);
@@ -124,6 +126,7 @@ export async function refreshBridgeProjects() {
             const v = parseNumberFromPayload(msg, subCfg);
             if (v == null) continue;
             const ts = new Date();
+            if (debug) console.log(`[Bridge] msg project=${projectId} userId=${subCfg.userId || 'null'} val=${v}`);
             // ---- Simple 3mm suppression ----
             let storeThis = subCfg.storeHistory === true;
             const prevStored = lastStoredReading.get(projectId);
@@ -184,11 +187,10 @@ export async function refreshBridgeProjects() {
             }
             if (storeThis && subCfg.storeHistory) {
               try {
-                await db.collection('readings').insertOne({
-                  projectId,
-                  levelMeters: v,
-                  ts,
-                });
+                const readingDoc = { projectId, levelMeters: v, ts };
+                if (subCfg.userId) readingDoc.userId = subCfg.userId;
+                await db.collection('readings').insertOne(readingDoc);
+                if (debug) console.log(`[Bridge] stored reading project=${projectId} userId=${subCfg.userId || 'null'} value=${v}`);
                 lastStoredReading.set(projectId, { value: v, ts: Date.now() });
               } catch (e) { console.error('Bridge: insert error', e?.message || e); }
             }
@@ -226,7 +228,7 @@ export async function refreshBridgeProjects() {
     if (!entry) continue;
     if (!entry.topicToProjects.has(p.topic)) entry.topicToProjects.set(p.topic, new Set());
     entry.topicToProjects.get(p.topic).add(p.projectId);
-    currentSubs.set(p.projectId, { topic: p.topic, clientKey: cfg.key, sensorType: p.sensorType, multiplier: p.multiplier, offset: p.offset, tankType: p.tankType, alertsEnabled: p.alertsEnabled, alertLow: p.alertLow, alertHigh: p.alertHigh, alertCooldownSec: p.alertCooldownSec, notifyOnRecover: p.notifyOnRecover, alertHysteresisMeters: p.alertHysteresisMeters, projectName: p.projectName });
+    currentSubs.set(p.projectId, { topic: p.topic, clientKey: cfg.key, sensorType: p.sensorType, multiplier: p.multiplier, offset: p.offset, tankType: p.tankType, alertsEnabled: p.alertsEnabled, alertLow: p.alertLow, alertHigh: p.alertHigh, alertCooldownSec: p.alertCooldownSec, notifyOnRecover: p.notifyOnRecover, alertHysteresisMeters: p.alertHysteresisMeters, projectName: p.projectName, storeHistory: p.storeHistory, userId: p.userId });
   }
   for (const [pid] of currentSubs.entries()) { if (!list.find(p => p.projectId === pid)) { currentSubs.delete(pid); } }
   if (requiredKeys.size === 0 && clients.size === 0) { console.warn('Bridge: no active MQTT clients (no projects with storeHistory=true and no MQTT_URL override)'); }
