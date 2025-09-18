@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import { getDb, initDb } from './db.js';
 import { startBridge, refreshBridgeProjects } from './mqttBridge.js';
 import { initFcm } from './fcm.js';
@@ -10,9 +12,76 @@ dotenv.config();
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json());
+
+// --- Auth Helpers ---
+function getJwtSecret() {
+  const s = process.env.JWT_SECRET;
+  if (!s) throw new Error('JWT_SECRET env var required');
+  return s;
+}
+
+async function findUserByEmail(db, email) {
+  return db.collection('users').findOne({ email: email.toLowerCase() });
+}
+
+function issueToken(user) {
+  const payload = { uid: user._id.toString(), email: user.email };
+  return jwt.sign(payload, getJwtSecret(), { expiresIn: '30d' });
+}
+
+async function authMiddleware(req, res, next) {
+  try {
+    const auth = req.headers.authorization || '';
+    if (!auth.startsWith('Bearer ')) return res.status(401).json({ ok: false, error: 'missing bearer token' });
+    const token = auth.substring(7);
+    const decoded = jwt.verify(token, getJwtSecret());
+    req.user = decoded; // { uid, email }
+    return next();
+  } catch (e) {
+    return res.status(401).json({ ok: false, error: 'invalid token' });
+  }
+}
+
+// --- Auth Routes ---
+// Body: { email, password }
+app.post('/signup', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password || password.length < 6) {
+      return res.status(400).json({ ok: false, error: 'email and password (min 6 chars) required' });
+    }
+    const db = await getDb();
+    const existing = await findUserByEmail(db, email);
+    if (existing) return res.status(409).json({ ok: false, error: 'email already exists' });
+    const passwordHash = await bcrypt.hash(password, 10);
+    const userDoc = { email: email.toLowerCase(), passwordHash, createdAt: new Date() };
+    const insertRes = await db.collection('users').insertOne(userDoc);
+    // Optionally auto-login after signup
+    const token = issueToken({ _id: insertRes.insertedId, email: userDoc.email });
+    res.json({ ok: true, token });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ ok: false, error: 'email and password required' });
+    const db = await getDb();
+    const user = await findUserByEmail(db, email);
+    if (!user) return res.status(401).json({ ok: false, error: 'invalid credentials' });
+    const match = await bcrypt.compare(password, user.passwordHash);
+    if (!match) return res.status(401).json({ ok: false, error: 'invalid credentials' });
+    const token = issueToken(user);
+    res.json({ ok: true, token });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 // Register a device token for FCM notifications
 // Body: { token: string, projectId?: string }
-app.post('/register-device', async (req, res) => {
+app.post('/register-device', authMiddleware, async (req, res) => {
   try {
     const { token, projectId } = req.body || {};
     if (!token) return res.status(400).json({ ok: false, error: 'token required' });
@@ -20,9 +89,10 @@ app.post('/register-device', async (req, res) => {
     const doc = {
       token,
       projectId: projectId || null,
+      userId: req.user.uid,
       updatedAt: new Date(),
     };
-    await db.collection('devices').updateOne({ token }, { $set: doc }, { upsert: true });
+    await db.collection('devices').updateOne({ token, userId: req.user.uid }, { $set: doc }, { upsert: true });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -46,10 +116,10 @@ app.get('/ping', (req, res) => {
 });
 
 // Example route: list projects
-app.get('/projects', async (req, res) => {
+app.get('/projects', authMiddleware, async (req, res) => {
   try {
     const db = await getDb();
-    const items = await db.collection('projects').find({}).limit(50).toArray();
+    const items = await db.collection('projects').find({ userId: req.user.uid }).limit(200).toArray();
     res.json({ ok: true, items });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -64,7 +134,7 @@ app.get('/projects', async (req, res) => {
 //   multiplier?, offset?, sensorType?, tankType?,
 //   alertsEnabled?, alertLow?, alertHigh?, alertCooldownSec?, notifyOnRecover?
 // }
-app.post('/projects', async (req, res) => {
+app.post('/projects', authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
     const id = body.id;
@@ -91,9 +161,10 @@ app.post('/projects', async (req, res) => {
       alertHysteresisMeters: (typeof body.alertHysteresisMeters === 'number' && body.alertHysteresisMeters >= 0)
         ? body.alertHysteresisMeters
         : null,
+      userId: req.user.uid,
       updatedAt: new Date(),
     };
-    await db.collection('projects').updateOne({ id }, { $set: doc }, { upsert: true });
+    await db.collection('projects').updateOne({ id, userId: req.user.uid }, { $set: doc }, { upsert: true });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -102,7 +173,7 @@ app.post('/projects', async (req, res) => {
 
 // Store a reading
 // Body: { projectId: string, levelMeters: number, percent: number, liquidLiters: number, totalLiters: number, ts?: ISOString }
-app.post('/readings', async (req, res) => {
+app.post('/readings', authMiddleware, async (req, res) => {
   try {
     const { projectId, levelMeters, percent, liquidLiters, totalLiters, ts } = req.body || {};
     if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
@@ -115,6 +186,7 @@ app.post('/readings', async (req, res) => {
       liquidLiters: Number(liquidLiters ?? 0),
       totalLiters: Number(totalLiters ?? 0),
       ts: now,
+      userId: req.user.uid,
     };
     await db.collection('readings').insertOne(doc);
     res.json({ ok: true });
@@ -125,12 +197,12 @@ app.post('/readings', async (req, res) => {
 
 // Query readings for charts
 // Query params: projectId (required), from (ISO), to (ISO), limit (default 500)
-app.get('/readings', async (req, res) => {
+app.get('/readings', authMiddleware, async (req, res) => {
   try {
     const { projectId, from, to, limit } = req.query;
     if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
     const db = await getDb();
-    const q = { projectId };
+    const q = { projectId, userId: req.user.uid };
     if (from || to) {
       q.ts = {};
       if (from) q.ts.$gte = new Date(from);
@@ -157,14 +229,63 @@ if (!port || Number.isNaN(port)) {
 initDb().then(() => {
   app.listen(port, '0.0.0.0', () => {
     console.log(`API listening on port ${port}`);
+    try {
+      const routes = [];
+      app._router?.stack?.forEach(layer => {
+        if (layer.route && layer.route.path) {
+          routes.push(`${Object.keys(layer.route.methods).join(',').toUpperCase()} ${layer.route.path}`);
+        }
+      });
+      console.log('[RouteList]', routes.join(' | '));
+    } catch (e) {
+      console.log('Route list error', e.message);
+    }
   });
   // Start MQTT bridge after DB init
   initFcm();
   startBridge().catch(err => console.error('Bridge start error', err));
 });
 
+// Diagnostics: list registered top-level routes (non-production recommended)
+app.get('/debug/routes', (req, res) => {
+  try {
+    const out = [];
+    app._router?.stack?.forEach(layer => {
+      if (layer.route && layer.route.path) {
+        const methods = Object.keys(layer.route.methods).join(',');
+        out.push({ path: layer.route.path, methods });
+      }
+    });
+    res.json({ ok: true, routes: out });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Version endpoint (include commit SHA if provided at build time via env)
+app.get('/version', (req, res) => {
+  res.json({ ok: true, sha: process.env.GIT_COMMIT || null });
+});
+
+app.get('/routes-check', (req, res) => {
+  try {
+    const info = {};
+    const list = [];
+    app._router?.stack?.forEach(layer => {
+      if (layer.route && layer.route.path) {
+        const methods = Object.keys(layer.route.methods);
+        list.push({ path: layer.route.path, methods });
+        if (layer.route.path === '/signup') info.signup = true;
+      }
+    });
+    res.json({ ok: true, signupPresent: info.signup === true, routes: list });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Admin endpoint to reload bridge projects (optional)
-app.post('/bridge/reload', async (req, res) => {
+app.post('/bridge/reload', authMiddleware, async (req, res) => {
   try {
     await refreshBridgeProjects();
     res.json({ ok: true });
