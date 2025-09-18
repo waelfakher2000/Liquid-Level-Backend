@@ -112,7 +112,7 @@ export async function refreshBridgeProjects() {
         clean: true,
       });
       const topicToProjects = new Map();
-      c.on('connect', () => console.log(`Bridge: MQTT connected ${cfg.url}`));
+  c.on('connect', () => console.log(`Bridge: MQTT connected ${cfg.url}`));
       c.on('reconnect', () => console.log(`Bridge: MQTT reconnecting ${cfg.url}`));
       c.on('error', (e) => console.error(`Bridge: MQTT error ${cfg.url}`, e?.message || e));
       const debug = String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true';
@@ -229,6 +229,25 @@ export async function refreshBridgeProjects() {
     if (!entry.topicToProjects.has(p.topic)) entry.topicToProjects.set(p.topic, new Set());
     entry.topicToProjects.get(p.topic).add(p.projectId);
     currentSubs.set(p.projectId, { topic: p.topic, clientKey: cfg.key, sensorType: p.sensorType, multiplier: p.multiplier, offset: p.offset, tankType: p.tankType, alertsEnabled: p.alertsEnabled, alertLow: p.alertLow, alertHigh: p.alertHigh, alertCooldownSec: p.alertCooldownSec, notifyOnRecover: p.notifyOnRecover, alertHysteresisMeters: p.alertHysteresisMeters, projectName: p.projectName, storeHistory: p.storeHistory, userId: p.userId });
+    // Ensure client subscribed to topic
+    try {
+      if (entry.client && entry.client.connected) {
+        entry.client.subscribe(p.topic, {}, (err) => {
+          if (err) console.error('Bridge: subscribe error', p.topic, err?.message || err);
+          else if (String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true') console.log('[Bridge] subscribed topic', p.topic);
+        });
+      } else {
+        // If not yet connected, queue subscribe after connect
+        entry.client.once('connect', () => {
+          try {
+            entry.client.subscribe(p.topic, {}, (err) => {
+              if (err) console.error('Bridge: delayed subscribe error', p.topic, err?.message || err);
+              else if (String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true') console.log('[Bridge] subscribed topic (delayed)', p.topic);
+            });
+          } catch (e) { console.error('Bridge: subscribe exception', e?.message || e); }
+        });
+      }
+    } catch (e) { console.error('Bridge: subscribe setup error', e?.message || e); }
   }
   for (const [pid] of currentSubs.entries()) { if (!list.find(p => p.projectId === pid)) { currentSubs.delete(pid); } }
   if (requiredKeys.size === 0 && clients.size === 0) { console.warn('Bridge: no active MQTT clients (no projects with storeHistory=true and no MQTT_URL override)'); }
