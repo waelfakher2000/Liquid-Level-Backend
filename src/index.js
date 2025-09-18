@@ -79,6 +79,15 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// Simple token validation & user info
+app.get('/me', authMiddleware, async (req, res) => {
+  try {
+    res.json({ ok: true, user: { id: req.user.uid, email: req.user.email } });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 // Register a device token for FCM notifications
 // Body: { token: string, projectId?: string }
 app.post('/register-device', authMiddleware, async (req, res) => {
