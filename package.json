@@ -6,7 +6,8 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "dev": "node --watch src/index.js",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "cleanup:legacy": "node scripts/cleanup_legacy_readings.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
