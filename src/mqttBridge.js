@@ -15,6 +15,12 @@ const notifyUpdates = String(process.env.NOTIFY_UPDATES).toLowerCase() === 'true
 const notifyUpdatesIntervalSec = Number.isFinite(Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC)) ? Math.max(0, Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC)) : 0;
 const lastUpdatePush = new Map();
 
+// --- Simple 3mm suppression ---
+// Any reading whose absolute difference from the last STORED value for the same project
+// is < 0.003 meters (3 mm) is skipped. No timers, no rounding, no env config.
+// Alert transitions still force storage so history shows them.
+const lastStoredReading = new Map(); // projectId -> { value, tsMs }
+
 function _collectInvalidTokens(sendRes, tokens) {
   try {
     if (!sendRes || !sendRes.res || !Array.isArray(sendRes.res.responses)) return [];
@@ -118,15 +124,14 @@ export async function refreshBridgeProjects() {
             const v = parseNumberFromPayload(msg, subCfg);
             if (v == null) continue;
             const ts = new Date();
-            if (subCfg.storeHistory) {
-              await db.collection('readings').insertOne({
-                projectId,
-                levelMeters: v,
-                percent: 0,
-                liquidLiters: 0,
-                totalLiters: 0,
-                ts,
-              });
+            // ---- Simple 3mm suppression ----
+            let storeThis = subCfg.storeHistory === true;
+            const prevStored = lastStoredReading.get(projectId);
+            if (storeThis && prevStored) {
+              const diff = Math.abs(prevStored.value - v);
+              if (diff < 0.003) {
+                storeThis = false; // skip tiny change
+              }
             }
             if (subCfg.alertsEnabled) {
               const low = (typeof subCfg.alertLow === 'number') ? subCfg.alertLow : null;
@@ -173,7 +178,19 @@ export async function refreshBridgeProjects() {
               if ((crossedIntoAlert && cooledDown) || recovered) {
                 lastAlertState.set(projectId, { lastState: state, lastTs: nowMs });
                 try { await db.collection('projects').updateOne({ id: projectId }, { $set: { lastAlertState: state, lastAlertAt: new Date(nowMs) } }); } catch {}
+                // Force storing this reading even if it would have been skipped, to reflect transition.
+                if (!storeThis && subCfg.storeHistory) storeThis = true;
               }
+            }
+            if (storeThis && subCfg.storeHistory) {
+              try {
+                await db.collection('readings').insertOne({
+                  projectId,
+                  levelMeters: v,
+                  ts,
+                });
+                lastStoredReading.set(projectId, { value: v, ts: Date.now() });
+              } catch (e) { console.error('Bridge: insert error', e?.message || e); }
             }
             if (notifyUpdates && isFcmEnabled()) {
               const lastPush = lastUpdatePush.get(projectId) || 0;
