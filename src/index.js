@@ -108,6 +108,46 @@ app.post('/register-device', authMiddleware, async (req, res) => {
   }
 });
 
+// List device tokens for current user (diagnostics)
+app.get('/devices', authMiddleware, async (req, res) => {
+  try {
+    const db = await getDb();
+    const items = await db.collection('devices').find({ userId: req.user.uid }, { projection: { _id: 0 } }).toArray();
+    res.json({ ok: true, items });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// Prune duplicate device tokens for current user
+app.post('/devices/prune', authMiddleware, async (req, res) => {
+  try {
+    const db = await getDb();
+    const items = await db.collection('devices').find({ userId: req.user.uid }).toArray();
+    const byToken = new Map();
+    for (const d of items) {
+      if (!d.token) continue;
+      if (!byToken.has(d.token)) byToken.set(d.token, []);
+      byToken.get(d.token).push(d);
+    }
+    let removed = 0;
+    for (const [token, list] of byToken.entries()) {
+      if (list.length > 1) {
+        // Keep the most recent updatedAt (or arbitrary first) and remove the rest
+        list.sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+        const toRemove = list.slice(1);
+        // Safer removal: delete all entries for this token+user and re-insert the latest one
+        await db.collection('devices').deleteMany({ userId: req.user.uid, token });
+        await db.collection('devices').insertOne({ ...list[0], _id: undefined });
+        removed += toRemove.length;
+      }
+    }
+    res.json({ ok: true, removed });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/health', async (req, res) => {
   try {
     const db = await getDb();
@@ -141,7 +181,8 @@ app.get('/projects', authMiddleware, async (req, res) => {
 //   broker, port, topic, username?, password?,
 //   storeHistory,
 //   multiplier?, offset?, sensorType?, tankType?,
-//   alertsEnabled?, alertLow?, alertHigh?, alertCooldownSec?, notifyOnRecover?
+//   alertsEnabled?, alertLow?, alertHigh?, alertCooldownSec?, notifyOnRecover?,
+//   alertHysteresisMeters?, noiseDeadbandMeters?
 // }
 app.post('/projects', authMiddleware, async (req, res) => {
   try {
@@ -169,6 +210,9 @@ app.post('/projects', authMiddleware, async (req, res) => {
       notifyOnRecover: body.notifyOnRecover === true,
       alertHysteresisMeters: (typeof body.alertHysteresisMeters === 'number' && body.alertHysteresisMeters >= 0)
         ? body.alertHysteresisMeters
+        : null,
+      noiseDeadbandMeters: (typeof body.noiseDeadbandMeters === 'number' && body.noiseDeadbandMeters >= 0)
+        ? body.noiseDeadbandMeters
         : null,
       // --- Extended persisted fields for cross-device sync (optional on POST) ---
       height: (typeof body.height === 'number') ? body.height : null,

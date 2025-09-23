@@ -10,14 +10,16 @@ const clients = new Map();
 let currentSubs = new Map();
 const lastAlertState = new Map();
 const globalHysteresis = Number.isFinite(Number(process.env.ALERT_HYSTERESIS_METERS)) ? Number(process.env.ALERT_HYSTERESIS_METERS) : 0;
+const globalNoiseDeadband = Number.isFinite(Number(process.env.NOISE_DEADBAND_METERS)) ? Number(process.env.NOISE_DEADBAND_METERS) : 0.003;
 let bridgeRunning = false;
 const notifyUpdates = String(process.env.NOTIFY_UPDATES).toLowerCase() === 'true';
 const notifyUpdatesIntervalSec = Number.isFinite(Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC)) ? Math.max(0, Number(process.env.NOTIFY_UPDATES_INTERVAL_SEC)) : 0;
 const lastUpdatePush = new Map();
 
-// --- Simple 3mm suppression ---
+// --- Simple deadband suppression ---
 // Any reading whose absolute difference from the last STORED value for the same project
-// is < 0.003 meters (3 mm) is skipped. No timers, no rounding, no env config.
+// is < deadband meters is skipped. Deadband can be set per-project (noiseDeadbandMeters)
+// and falls back to NOISE_DEADBAND_METERS env (default 0.003m ≈ 3mm).
 // Alert transitions still force storage so history shows them.
 const lastStoredReading = new Map(); // projectId -> { value, tsMs }
 
@@ -73,6 +75,7 @@ async function upsertProjectsFromDb() {
     alertCooldownSec: Number.isFinite(p.alertCooldownSec) ? Number(p.alertCooldownSec) : 1800,
     notifyOnRecover: p.notifyOnRecover === true,
     alertHysteresisMeters: Number.isFinite(p.alertHysteresisMeters) ? Number(p.alertHysteresisMeters) : null,
+    noiseDeadbandMeters: Number.isFinite(p.noiseDeadbandMeters) ? Number(p.noiseDeadbandMeters) : null,
     userId: p.userId || null,
   }));
 }
@@ -127,12 +130,13 @@ export async function refreshBridgeProjects() {
             if (v == null) continue;
             const ts = new Date();
             if (debug) console.log(`[Bridge] msg project=${projectId} userId=${subCfg.userId || 'null'} val=${v}`);
-            // ---- Simple 3mm suppression ----
+            // ---- Simple deadband suppression ----
             let storeThis = subCfg.storeHistory === true;
             const prevStored = lastStoredReading.get(projectId);
             if (storeThis && prevStored) {
               const diff = Math.abs(prevStored.value - v);
-              if (diff < 0.003) {
+              const deadband = Number.isFinite(subCfg.noiseDeadbandMeters) && subCfg.noiseDeadbandMeters != null ? subCfg.noiseDeadbandMeters : globalNoiseDeadband;
+              if (diff < deadband) {
                 storeThis = false; // skip tiny change
               }
             }
@@ -167,12 +171,22 @@ export async function refreshBridgeProjects() {
                 try {
                   const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
                   const devices = await deviceCursor.toArray();
-                  const tokens = devices.map(d => d.token).filter(Boolean);
+                  const tokens = Array.from(new Set(devices.map(d => d.token).filter(Boolean)));
                   if (tokens.length) {
                     const res = await sendToTokens(tokens, {
-                      notification: { title: `${alertTitle} (${displayName})`, body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}${hysteresis > 0 ? ` (hyst=${hysteresis}m)` : ''}` },
-                      data: { projectId: String(projectId), projectName: displayName, levelMeters: String(v), ts: ts.toISOString(), alertState: state, hysteresisMeters: String(hysteresis) }
-                    });
+                      // Data-only payload to prevent OS auto notifications (we show locally in app)
+                      data: {
+                        title: `${alertTitle} (${displayName})`,
+                        body: `Level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}${hysteresis > 0 ? ` (hyst=${hysteresis}m)` : ''}`,
+                        projectId: String(projectId),
+                        projectName: displayName,
+                        levelMeters: String(v),
+                        ts: ts.toISOString(),
+                        alertState: state,
+                        hysteresisMeters: String(hysteresis),
+                        messageId: `${projectId}:alert:${state}:${Math.floor(Date.now()/1000)}`
+                      }
+                    }, { android: { collapseKey: `alert_${projectId}` } });
                     const invalid = _collectInvalidTokens(res, tokens);
                     if (invalid.length) { try { await db.collection('devices').deleteMany({ token: { $in: invalid } }); } catch {} }
                   }
@@ -201,10 +215,20 @@ export async function refreshBridgeProjects() {
                 try {
                   const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
                   const devices = await deviceCursor.toArray();
-                  const tokens = devices.map(d => d.token).filter(Boolean);
+                  const tokens = Array.from(new Set(devices.map(d => d.token).filter(Boolean)));
                   if (tokens.length) {
                     const displayName = (subCfg.projectName && subCfg.projectName.trim().length) ? subCfg.projectName.trim() : projectId;
-                    const res = await sendToTokens(tokens, { notification: { title: `Level update (${displayName})`, body: `New level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}` }, data: { projectId: String(projectId), projectName: displayName, levelMeters: String(v), ts: ts.toISOString() } });
+                    const res = await sendToTokens(tokens, {
+                      data: {
+                        title: `Level update (${displayName})`,
+                        body: `New level: ${v.toFixed(3)} m @ ${ts.toLocaleTimeString()}`,
+                        projectId: String(projectId),
+                        projectName: displayName,
+                        levelMeters: String(v),
+                        ts: ts.toISOString(),
+                        messageId: `${projectId}:update:${Math.floor(Date.now()/1000)}`
+                      }
+                    }, { android: { collapseKey: `update_${projectId}` } });
                     const invalid = _collectInvalidTokens(res, tokens);
                     if (invalid.length) { try { await db.collection('devices').deleteMany({ token: { $in: invalid } }); } catch {} }
                   }
@@ -228,24 +252,23 @@ export async function refreshBridgeProjects() {
     if (!entry) continue;
     if (!entry.topicToProjects.has(p.topic)) entry.topicToProjects.set(p.topic, new Set());
     entry.topicToProjects.get(p.topic).add(p.projectId);
-    currentSubs.set(p.projectId, { topic: p.topic, clientKey: cfg.key, sensorType: p.sensorType, multiplier: p.multiplier, offset: p.offset, tankType: p.tankType, alertsEnabled: p.alertsEnabled, alertLow: p.alertLow, alertHigh: p.alertHigh, alertCooldownSec: p.alertCooldownSec, notifyOnRecover: p.notifyOnRecover, alertHysteresisMeters: p.alertHysteresisMeters, projectName: p.projectName, storeHistory: p.storeHistory, userId: p.userId });
-    // Ensure client subscribed to topic
+    currentSubs.set(p.projectId, { topic: p.topic, clientKey: cfg.key, sensorType: p.sensorType, multiplier: p.multiplier, offset: p.offset, tankType: p.tankType, alertsEnabled: p.alertsEnabled, alertLow: p.alertLow, alertHigh: p.alertHigh, alertCooldownSec: p.alertCooldownSec, notifyOnRecover: p.notifyOnRecover, alertHysteresisMeters: p.alertHysteresisMeters, noiseDeadbandMeters: p.noiseDeadbandMeters, projectName: p.projectName, storeHistory: p.storeHistory, userId: p.userId });
+    // Ensure client subscribed to topic only once per topic
     try {
-      if (entry.client && entry.client.connected) {
-        entry.client.subscribe(p.topic, {}, (err) => {
-          if (err) console.error('Bridge: subscribe error', p.topic, err?.message || err);
-          else if (String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true') console.log('[Bridge] subscribed topic', p.topic);
-        });
-      } else {
-        // If not yet connected, queue subscribe after connect
-        entry.client.once('connect', () => {
+      if (!entry.subscribedTopics) entry.subscribedTopics = new Set();
+      if (!entry.subscribedTopics.has(p.topic)) {
+        const doSubscribe = () => {
           try {
             entry.client.subscribe(p.topic, {}, (err) => {
-              if (err) console.error('Bridge: delayed subscribe error', p.topic, err?.message || err);
-              else if (String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true') console.log('[Bridge] subscribed topic (delayed)', p.topic);
+              if (err) console.error('Bridge: subscribe error', p.topic, err?.message || err);
+              else {
+                entry.subscribedTopics.add(p.topic);
+                if (String(process.env.BRIDGE_DEBUG).toLowerCase() === 'true') console.log('[Bridge] subscribed topic', p.topic);
+              }
             });
           } catch (e) { console.error('Bridge: subscribe exception', e?.message || e); }
-        });
+        };
+        if (entry.client && entry.client.connected) doSubscribe(); else entry.client.once('connect', doSubscribe);
       }
     } catch (e) { console.error('Bridge: subscribe setup error', e?.message || e); }
   }
