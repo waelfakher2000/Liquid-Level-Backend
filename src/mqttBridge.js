@@ -169,7 +169,7 @@ export async function refreshBridgeProjects() {
               const shouldNotify = (crossedIntoAlert && cooledDown) || (recovered && subCfg.notifyOnRecover && cooledDown);
               if (shouldNotify && isFcmEnabled()) {
                 try {
-                  const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
+                  const deviceCursor = db.collection('devices').find({ userId: subCfg.userId, $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
                   const devices = await deviceCursor.toArray();
                   const tokens = Array.from(new Set(devices.map(d => d.token).filter(Boolean)));
                   if (tokens.length) {
@@ -213,7 +213,7 @@ export async function refreshBridgeProjects() {
               const now = Date.now();
               if (!notifyUpdatesIntervalSec || (now - lastPush) > notifyUpdatesIntervalSec * 1000) {
                 try {
-                  const deviceCursor = db.collection('devices').find({ $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
+                  const deviceCursor = db.collection('devices').find({ userId: subCfg.userId, $or: [ { projectId }, { projectId: null } ] }, { projection: { _id: 0, token: 1 } });
                   const devices = await deviceCursor.toArray();
                   const tokens = Array.from(new Set(devices.map(d => d.token).filter(Boolean)));
                   if (tokens.length) {

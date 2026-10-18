@@ -93,11 +93,11 @@ app.get('/me', authMiddleware, async (req, res) => {
 app.post('/register-device', authMiddleware, async (req, res) => {
   try {
     const { token, projectId } = req.body || {};
-    if (!token) return res.status(400).json({ ok: false, error: 'token required' });
+    if (typeof token !== 'string' || !token) return res.status(400).json({ ok: false, error: 'token required' });
     const db = await getDb();
     const doc = {
       token,
-      projectId: projectId || null,
+      projectId: typeof projectId === 'string' && projectId ? projectId : null,
       userId: req.user.uid,
       updatedAt: new Date(),
     };
@@ -188,7 +188,7 @@ app.post('/projects', authMiddleware, async (req, res) => {
   try {
     const body = req.body || {};
     const id = body.id;
-    if (!id) return res.status(400).json({ ok: false, error: 'id required' });
+    if (typeof id !== 'string' || !id) return res.status(400).json({ ok: false, error: 'id required' });
     const db = await getDb();
     const doc = {
       id,
@@ -269,7 +269,7 @@ app.delete('/projects/:id', authMiddleware, async (req, res) => {
 app.post('/readings', authMiddleware, async (req, res) => {
   try {
     const { projectId, levelMeters, percent, liquidLiters, totalLiters, ts } = req.body || {};
-    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
+    if (typeof projectId !== 'string' || !projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
     const now = new Date(ts || Date.now());
     const db = await getDb();
     const doc = {
@@ -293,7 +293,7 @@ app.post('/readings', authMiddleware, async (req, res) => {
 app.get('/readings', authMiddleware, async (req, res) => {
   try {
     const { projectId, from, to, limit } = req.query;
-    if (!projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
+    if (typeof projectId !== 'string' || !projectId) return res.status(400).json({ ok: false, error: 'projectId required' });
     const db = await getDb();
     const q = { projectId, userId: req.user.uid };
     if (from || to) {
@@ -340,7 +340,7 @@ initDb().then(() => {
 });
 
 // Diagnostics: list registered top-level routes (non-production recommended)
-app.get('/debug/routes', (req, res) => {
+app.get('/debug/routes', authMiddleware, (req, res) => {
   try {
     const out = [];
     app._router?.stack?.forEach(layer => {
@@ -360,7 +360,7 @@ app.get('/version', (req, res) => {
   res.json({ ok: true, sha: process.env.GIT_COMMIT || null });
 });
 
-app.get('/routes-check', (req, res) => {
+app.get('/routes-check', authMiddleware, (req, res) => {
   try {
     const info = {};
     const list = [];
